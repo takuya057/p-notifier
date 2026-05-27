@@ -5,6 +5,7 @@
 Cookie jar でレスポンスの Set-Cookie を自動更新するため、初回 .env で渡すだけで
 セッションは定期実行が続く限り永続化される。
 """
+import datetime
 import http.cookiejar
 import json
 import os
@@ -17,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 BASE_URL = "https://tool.gacha-station.com"
-API_URL = f"{BASE_URL}/admin/payment-history/get?page=1&length=20"
+API_URL = f"{BASE_URL}/admin/payment-history/get?page=1&length=100"
 LOGIN_PAGE_URL = f"{BASE_URL}/user/login"
 LOGIN_POST_URL = f"{BASE_URL}/user/login/post"
 BASE_DIR = Path(__file__).parent
@@ -28,6 +29,13 @@ RETRY_COUNT = 3
 RETRY_WAIT = 3
 ERROR_NOTIFY_INTERVAL = 3600  # 同種エラーの通知は最低1時間あける
 RECOVERY_MIN_DOWNTIME = 60  # この時間以上ダウンしていた場合のみ復旧通知
+
+# 重要通知の閾値
+HIGH_AMOUNT_THRESHOLD = 30000  # この金額以上で高額アラート
+RAPID_WINDOW_SECONDS = 3600  # 連続課金の集計時間枠 (1時間)
+RAPID_COUNT_THRESHOLD = 10  # 連続課金とみなす件数
+RAPID_ALERT_COOLDOWN = 3600  # 同ユーザーの連続課金アラートのクールダウン (1時間)
+JST = datetime.timezone(datetime.timedelta(hours=9))
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -82,11 +90,13 @@ def load_state() -> dict:
             "last_error_at": 0,
             "last_error_kind": None,
             "updated_at": 0,
+            "alert_history": {},
         }
     data = json.loads(STATE_FILE.read_text())
     data.setdefault("last_error_at", 0)
     data.setdefault("last_error_kind", None)
     data.setdefault("updated_at", 0)
+    data.setdefault("alert_history", {})
     return data
 
 
@@ -258,16 +268,23 @@ def post_discord(webhook_url: str, payload: dict) -> None:
         pass
 
 
-def notify_payment(webhook_url: str, payment: dict) -> None:
+def notify_payment(webhook_url: str, payment: dict, high_amount: bool = False) -> None:
     method = PAYMENT_METHOD_LABELS.get(
         payment.get("payment_method", ""), payment.get("payment_method", "不明")
     )
     status = PAYMENT_STATUS_LABELS.get(
         payment.get("payment_status"), str(payment.get("payment_status"))
     )
+    price = payment.get("price", 0)
+    if high_amount:
+        title = f"🚨 高額課金 ¥{price:,} 🚨"
+        color = 0xE74C3C  # 赤
+    else:
+        title = f"💰 新規課金 ¥{price:,}"
+        color = 0x2ECC71  # 緑
     embed = {
-        "title": f"💰 新規課金 ¥{payment.get('price', 0):,}",
-        "color": 0x2ECC71,
+        "title": title,
+        "color": color,
         "fields": [
             {
                 "name": "ユーザー",
@@ -286,7 +303,79 @@ def notify_payment(webhook_url: str, payment: dict) -> None:
         ],
         "footer": {"text": f"payment_id: {payment.get('id')}"},
     }
-    post_discord(webhook_url, {"username": "課金通知Bot", "embeds": [embed]})
+    payload = {"username": "課金通知Bot", "embeds": [embed]}
+    if high_amount:
+        payload["content"] = "@everyone 🚨 **高額課金検知**"
+        payload["allowed_mentions"] = {"parse": ["everyone"]}
+    post_discord(webhook_url, payload)
+
+
+def notify_rapid_charge(webhook_url: str, email: str, payments: list) -> None:
+    """過去1時間に同ユーザーが10件以上課金 → 連続課金アラート."""
+    total = sum(p.get("price", 0) for p in payments)
+    total_pt = sum(p.get("point", 0) for p in payments)
+    times = [p.get("created_at", "") for p in payments]
+    embed = {
+        "title": f"⚡ 連続課金検知 ({len(payments)}件 / 1時間以内)",
+        "color": 0xE74C3C,  # 赤
+        "description": f"同一ユーザーが過去1時間に **{len(payments)}件 ¥{total:,}** 課金しています。",
+        "fields": [
+            {"name": "ユーザー", "value": str(email), "inline": False},
+            {"name": "件数", "value": f"{len(payments)} 件", "inline": True},
+            {"name": "合計金額", "value": f"¥{total:,}", "inline": True},
+            {"name": "合計Pt", "value": f"{total_pt:,} pt", "inline": True},
+            {"name": "最初", "value": str(times[-1]) if times else "?", "inline": True},
+            {"name": "最後", "value": str(times[0]) if times else "?", "inline": True},
+        ],
+        "footer": {"text": "同ユーザーへの連続課金アラートは1時間に1回まで"},
+    }
+    post_discord(
+        webhook_url,
+        {
+            "username": "課金通知Bot",
+            "content": "@everyone ⚡ **連続課金検知**",
+            "embeds": [embed],
+            "allowed_mentions": {"parse": ["everyone"]},
+        },
+    )
+
+
+def parse_jst(s: str) -> "datetime.datetime | None":
+    try:
+        return datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
+    except Exception:
+        return None
+
+
+def detect_rapid_charges(
+    rows: list, alert_history: dict, now_ts: float
+) -> list:
+    """rows 全体（直近100件）を見て、過去1時間に同メールが10件以上のユーザーを抽出.
+    クールダウン中は除外する。
+    Returns: [(email, [payments...]), ...]
+    """
+    cutoff = datetime.datetime.now(JST) - datetime.timedelta(seconds=RAPID_WINDOW_SECONDS)
+    by_email: dict[str, list] = {}
+    for r in rows:
+        created = parse_jst(r.get("created_at", ""))
+        if created is None or created < cutoff:
+            continue
+        email = r.get("email") or r.get("username") or ""
+        if not email:
+            continue
+        by_email.setdefault(email, []).append(r)
+
+    alerts = []
+    for email, ps in by_email.items():
+        if len(ps) < RAPID_COUNT_THRESHOLD:
+            continue
+        last_alert = alert_history.get(email, 0)
+        if now_ts - last_alert < RAPID_ALERT_COOLDOWN:
+            continue
+        # 新しい順にソート（最新が先頭）
+        ps.sort(key=lambda r: r.get("id", 0), reverse=True)
+        alerts.append((email, ps))
+    return alerts
 
 
 def notify_error_throttled(webhook_url: str, state: dict, kind: str, message: str) -> None:
@@ -416,9 +505,27 @@ def main() -> int:
     new_rows = [r for r in rows if r["id"] > last_id]
     print(f"last_id={last_id}, max_id={max_id}, new={len(new_rows)}")
 
+    # 1. 個別通知（高額判定込み）
     for row in new_rows:
-        notify_payment(webhook, row)
-        print(f"  notified payment_id={row['id']}")
+        is_high = (row.get("price", 0) or 0) >= HIGH_AMOUNT_THRESHOLD
+        notify_payment(webhook, row, high_amount=is_high)
+        tag = "🚨HIGH" if is_high else "💰"
+        print(f"  {tag} notified payment_id={row['id']} ¥{row.get('price', 0):,}")
+
+    # 2. 連続課金検知（直近100件全体を見て1時間以内の集計）
+    alert_history = state.get("alert_history", {})
+    now_ts = time.time()
+    rapid = detect_rapid_charges(rows, alert_history, now_ts)
+    for email, payments in rapid:
+        notify_rapid_charge(webhook, email, payments)
+        alert_history[email] = now_ts
+        print(f"  ⚡RAPID notified email={email} count={len(payments)}")
+
+    # 3. 24時間以上前のalert_history をクリーンアップ
+    alert_history = {
+        k: v for k, v in alert_history.items() if now_ts - v < 86400
+    }
+    state["alert_history"] = alert_history
 
     if new_rows:
         state["last_id"] = max_id
