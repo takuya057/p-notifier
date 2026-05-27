@@ -1,0 +1,17 @@
+# 機密情報
+.env
+.env.local
+cookies.txt
+
+# ログ
+notify.log
+notify.error.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Mac side internal
+.last_push
