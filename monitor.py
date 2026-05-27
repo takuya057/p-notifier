@@ -255,17 +255,26 @@ def fetch_payments(
 
 
 def post_discord(webhook_url: str, payload: dict) -> None:
-    req = urllib.request.Request(
-        webhook_url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "PaymentNotifierBot/1.0",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=TIMEOUT):
-        pass
+    """Discord webhook に POST. 429 (rate limit) は Retry-After で再試行."""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "PaymentNotifierBot/1.0",
+    }
+    for attempt in range(3):
+        req = urllib.request.Request(webhook_url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT):
+                return
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                retry_after = float(e.headers.get("Retry-After", "5"))
+                # Discord は通常 0.5秒〜数秒、念のため最大10秒
+                time.sleep(min(retry_after + 0.5, 10))
+                continue
+            raise
+    # 全て失敗してもエラーを上に投げる
+    raise RuntimeError("Discord webhook 3回試行失敗 (429リトライ後も)")
 
 
 def notify_payment(webhook_url: str, payment: dict, high_amount: bool = False) -> None:
@@ -502,33 +511,52 @@ def main() -> int:
         save_state(state)
         return 0
 
+    # 通知対象を抽出 (¥0 payment は除外、管理者登録など内部処理を除く)
     new_rows = [r for r in rows if r["id"] > last_id]
-    print(f"last_id={last_id}, max_id={max_id}, new={len(new_rows)}")
+    new_rows.sort(key=lambda r: r["id"])
+    notify_targets = [r for r in new_rows if (r.get("price", 0) or 0) > 0]
+    skipped_zero = len(new_rows) - len(notify_targets)
+    print(
+        f"last_id={last_id}, max_id={max_id}, "
+        f"new={len(new_rows)}, notify={len(notify_targets)}, skipped_zero={skipped_zero}"
+    )
 
-    # 1. 個別通知（高額判定込み）
-    for row in new_rows:
+    # 1. 個別通知（高額判定込み、エラー耐性、逐次state更新）
+    for row in notify_targets:
         is_high = (row.get("price", 0) or 0) >= HIGH_AMOUNT_THRESHOLD
-        notify_payment(webhook, row, high_amount=is_high)
-        tag = "🚨HIGH" if is_high else "💰"
-        print(f"  {tag} notified payment_id={row['id']} ¥{row.get('price', 0):,}")
+        try:
+            notify_payment(webhook, row, high_amount=is_high)
+            tag = "🚨HIGH" if is_high else "💰"
+            print(f"  {tag} notified payment_id={row['id']} ¥{row.get('price', 0):,}")
+        except Exception as e:
+            print(f"  ⚠️ notify failed payment_id={row['id']}: {e}", file=sys.stderr)
+        # 失敗しても last_id を進める (無限再通知の防止)
+        state["last_id"] = row["id"]
+        save_state(state)
 
-    # 2. 連続課金検知（直近100件全体を見て1時間以内の集計）
+    # last_id を確実に max_id に揃える（¥0スキップ分も飛ばす）
+    if new_rows:
+        state["last_id"] = max_id
+        save_state(state)
+
+    # 2. 連続課金検知（直近100件全体を見て1時間以内の集計、¥0除外）
     alert_history = state.get("alert_history", {})
     now_ts = time.time()
-    rapid = detect_rapid_charges(rows, alert_history, now_ts)
+    rapid_rows = [r for r in rows if (r.get("price", 0) or 0) > 0]
+    rapid = detect_rapid_charges(rapid_rows, alert_history, now_ts)
     for email, payments in rapid:
-        notify_rapid_charge(webhook, email, payments)
-        alert_history[email] = now_ts
-        print(f"  ⚡RAPID notified email={email} count={len(payments)}")
+        try:
+            notify_rapid_charge(webhook, email, payments)
+            alert_history[email] = now_ts
+            print(f"  ⚡RAPID notified email={email} count={len(payments)}")
+        except Exception as e:
+            print(f"  ⚠️ rapid alert failed {email}: {e}", file=sys.stderr)
 
     # 3. 24時間以上前のalert_history をクリーンアップ
     alert_history = {
         k: v for k, v in alert_history.items() if now_ts - v < 86400
     }
     state["alert_history"] = alert_history
-
-    if new_rows:
-        state["last_id"] = max_id
     save_state(state)
     return 0
 
