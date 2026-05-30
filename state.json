@@ -1,8 +1,10 @@
 {
-  "last_id": 3717685,
+  "last_id": 3717793,
   "last_error_at": 0,
   "last_error_kind": null,
   "error_first_at": 0,
-  "updated_at": 1780147699.0762439,
-  "alert_history": {}
+  "updated_at": 1780148008.1050408,
+  "alert_history": {
+    "kuwatoro_240@yahoo.co.jp": 1780147948.292743
+  }
 }
