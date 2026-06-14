@@ -1,8 +1,10 @@
 {
-  "last_id": 3867616,
+  "last_id": 3867639,
   "last_error_at": 0,
   "last_error_kind": null,
   "error_first_at": 0,
-  "updated_at": 1781436922.81509,
-  "alert_history": {}
+  "updated_at": 1781437234.307245,
+  "alert_history": {
+    "to7mo3ro9tcu1138z@icloud.com": 1781436938.725924
+  }
 }
