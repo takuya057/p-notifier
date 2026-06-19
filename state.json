@@ -1,8 +1,10 @@
 {
-  "last_id": 3974957,
+  "last_id": 3979516,
   "last_error_at": 0,
   "last_error_kind": null,
   "error_first_at": 0,
-  "updated_at": 1781887444.5564754,
-  "alert_history": {}
+  "updated_at": 1781893587.338992,
+  "alert_history": {
+    "krgk65qq@yahoo.co.jp": 1781893587.1025488
+  }
 }
