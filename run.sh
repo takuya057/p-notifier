@@ -21,12 +21,9 @@ fi
 
 if (( DO_SYNC == 1 )); then
     git fetch --quiet 2>/dev/null || true
-    LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
-    REMOTE_SHA=$(git rev-parse origin/main 2>/dev/null || echo "")
-
-    if [ -n "$LOCAL_SHA" ] && [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
-        # リモートが進んでる → state.jsonだけリモート版に上書き
-        # (run.sh等のコードはローカル優先で残す)
+    # ローカル(HEAD)が リモート(origin/main) の祖先 or 同じ場合のみ state.json を取り込む。
+    # ローカルが進んでる場合は state.json を巻き戻さない (重複通知防止)。
+    if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
         git checkout origin/main -- state.json 2>/dev/null || true
     fi
 fi
@@ -43,8 +40,13 @@ if (( DO_SYNC == 1 )); then
         git config user.email "takuya057@users.noreply.github.com"
         git add state.json
         git commit -m "chore: Mac heartbeat" -q 2>/dev/null
-        # push 失敗時 (リモートが先に進んでた場合) は次回のfetchで取り込む
-        git push -q 2>/dev/null || true
+        # push 失敗時はリモートが進んでたケース → rebase で取り込んで再push
+        if ! git push -q 2>/dev/null; then
+            git fetch --quiet 2>/dev/null
+            git rebase --strategy-option=ours origin/main --quiet 2>/dev/null \
+                || git rebase --abort 2>/dev/null
+            git push -q 2>/dev/null || true
+        fi
     fi
     echo "$NOW" > "$LAST_SYNC_FILE"
 fi
