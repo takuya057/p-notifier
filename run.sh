@@ -1,14 +1,29 @@
 #!/bin/bash
 # launchd ラッパー: 10秒おきに呼ばれる。
 # state.json を GitHub と双方向同期して、GitHub Actions と協調動作する。
-#
-# 同期戦略 (autostash conflictを回避):
-#   - 5分に1回だけ git ops を実行
-#   - リモートが進んでいたら、ローカル変更を捨てて完全に合わせる
-#     (GHAが進んでる = GHAが最新のpaymentを既に通知済み = Macは捨てて問題なし)
-#   - ローカルだけ進んでいたら、push する
 set -e
 cd "$(dirname "$0")"
+
+# === 排他制御 (atomic な mkdir でロック) ===
+# launchdが何らかの理由で同時起動した場合・前回が遅延して並行になった場合に、
+# state.jsonへの同時アクセスで重複通知が起きるのを防ぐ。
+LOCK_DIR="/tmp/p-notifier-mac.lock.d"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    # 既に他インスタンスが動いている → 静かに終了
+    # ただし、stale lock (古いロック) チェック: 5分以上前のロックは強制削除
+    if [ -d "$LOCK_DIR" ]; then
+        LOCK_AGE=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0) ))
+        if [ "$LOCK_AGE" -gt 300 ]; then
+            rmdir "$LOCK_DIR" 2>/dev/null
+            mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+        else
+            exit 0
+        fi
+    else
+        exit 0
+    fi
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT INT TERM
 
 SYNC_INTERVAL=300  # 5分に1回 git pull/push
 LAST_SYNC_FILE=".last_sync"
