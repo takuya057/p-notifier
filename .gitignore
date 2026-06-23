@@ -15,3 +15,6 @@ __pycache__/
 
 # Mac side internal
 .last_push
+
+# state.json は git管理せず、ローカルのみで永続化 (重複通知防止のため)
+state.json
