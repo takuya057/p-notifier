@@ -1,8 +1,10 @@
 name: Payment Notifier Failover
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # 自動実行は停止 (重複通知防止のため Mac launchd のみで運用)
+  # 必要なら workflow_dispatch で手動実行可能
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
