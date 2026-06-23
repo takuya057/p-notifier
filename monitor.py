@@ -83,6 +83,9 @@ def env_opt(name: str) -> str:
     return os.environ.get(name, "")
 
 
+NOTIFIED_IDS_MAX = 500  # 直近何件のpayment_idを保持するか (これより古いidは「通知済みかどうか」判定不能)
+
+
 def load_state() -> dict:
     if not STATE_FILE.exists():
         return {
@@ -91,12 +94,14 @@ def load_state() -> dict:
             "last_error_kind": None,
             "updated_at": 0,
             "alert_history": {},
+            "notified_ids": [],
         }
     data = json.loads(STATE_FILE.read_text())
     data.setdefault("last_error_at", 0)
     data.setdefault("last_error_kind", None)
     data.setdefault("updated_at", 0)
     data.setdefault("alert_history", {})
+    data.setdefault("notified_ids", [])
     return data
 
 
@@ -514,11 +519,22 @@ def main() -> int:
     # 通知対象を抽出 (¥0 payment は除外、管理者登録など内部処理を除く)
     new_rows = [r for r in rows if r["id"] > last_id]
     new_rows.sort(key=lambda r: r["id"])
-    notify_targets = [r for r in new_rows if (r.get("price", 0) or 0) > 0]
-    skipped_zero = len(new_rows) - len(notify_targets)
+
+    # dedup: 別インスタンス (GHA など) が既に通知済みのものは skip
+    notified_ids_set = set(state.get("notified_ids", []))
+    notify_targets = []
+    skipped_dup = 0
+    for r in new_rows:
+        if (r.get("price", 0) or 0) <= 0:
+            continue  # ¥0 課金は除外
+        if r["id"] in notified_ids_set:
+            skipped_dup += 1
+            continue  # 既に他インスタンスで通知済み
+        notify_targets.append(r)
+    skipped_zero = len([r for r in new_rows if (r.get("price", 0) or 0) <= 0])
     print(
-        f"last_id={last_id}, max_id={max_id}, "
-        f"new={len(new_rows)}, notify={len(notify_targets)}, skipped_zero={skipped_zero}"
+        f"last_id={last_id}, max_id={max_id}, new={len(new_rows)}, "
+        f"notify={len(notify_targets)}, skipped_zero={skipped_zero}, skipped_dup={skipped_dup}"
     )
 
     # 1. 個別通知（高額判定込み、エラー耐性、逐次state更新）
@@ -530,7 +546,9 @@ def main() -> int:
             print(f"  {tag} notified payment_id={row['id']} ¥{row.get('price', 0):,}")
         except Exception as e:
             print(f"  ⚠️ notify failed payment_id={row['id']}: {e}", file=sys.stderr)
-        # 失敗しても last_id を進める (無限再通知の防止)
+        # 通知済みIDに追加（失敗しても無限再通知を防ぐため）
+        notified_ids_set.add(row["id"])
+        state["notified_ids"] = sorted(notified_ids_set)[-NOTIFIED_IDS_MAX:]
         state["last_id"] = row["id"]
         save_state(state)
 
