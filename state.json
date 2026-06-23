@@ -1,9 +1,9 @@
 {
-  "last_id": 4113796,
+  "last_id": 4114503,
   "last_error_at": 0,
   "last_error_kind": null,
   "error_first_at": 0,
-  "updated_at": 1782219519.663389,
+  "updated_at": 1782219826.609941,
   "alert_history": {},
   "notified_ids": [
     4090918,
@@ -28,6 +28,7 @@
     4113359,
     4113703,
     4113755,
-    4113796
+    4113796,
+    4114503
   ]
 }
