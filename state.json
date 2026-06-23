@@ -3,6 +3,7 @@
   "last_error_at": 0,
   "last_error_kind": null,
   "error_first_at": 0,
-  "updated_at": 1782179555.931103,
-  "alert_history": {}
+  "updated_at": 1782179861.934022,
+  "alert_history": {},
+  "notified_ids": []
 }
